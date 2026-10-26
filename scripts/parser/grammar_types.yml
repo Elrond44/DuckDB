@@ -1280,6 +1280,7 @@ LogicalTypeList:
   by_value: false
   rules:
     - TypeList
+    - DropFunctionSignature
 
 TransactionModifierType:
   type: "TransactionModifierType"
