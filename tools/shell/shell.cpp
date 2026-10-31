@@ -2941,6 +2941,7 @@ enum class SQLWordType {
 	WORK,
 	READ,
 	BLOCK_OPENER,
+	CASE,
 	LOOP,
 	SEPARATOR,
 	OTHER
@@ -2978,7 +2979,7 @@ static SQLWordType ClassifySQLWord(const char *word, idx_t length) {
 	                                           {"work", SQLWordType::WORK},
 	                                           {"read", SQLWordType::READ},
 	                                           {"if", SQLWordType::BLOCK_OPENER},
-	                                           {"case", SQLWordType::BLOCK_OPENER},
+	                                           {"case", SQLWordType::CASE},
 	                                           {"while", SQLWordType::BLOCK_OPENER},
 	                                           {"for", SQLWordType::BLOCK_OPENER},
 	                                           {"foreach", SQLWordType::BLOCK_OPENER},
@@ -3035,6 +3036,8 @@ bool ShellState::SQLIsComplete(const char *zSql) {
 	// tracking for BEGIN ... END routine bodies (CREATE FUNCTION/PROCEDURE)
 	idx_t block_depth = 0;
 	idx_t paren_depth = 0;
+	// depth of CASE ... END expressions inside a body - their THEN/ELSE/END are not procedural
+	idx_t case_expr_depth = 0;
 	bool statement_start = true;
 	// a statement-initial BEGIN or END inside a body - transaction check against the next token pending
 	bool pending_begin = false;
@@ -3054,6 +3057,10 @@ bool ShellState::SQLIsComplete(const char *zSql) {
 			block_depth++;
 		}
 		if (head == SQLStatementHead::CREATE) {
+			head = SQLStatementHead::OTHER;
+		} else if (head == SQLStatementHead::CREATE_ROUTINE && prev_word == SQLWordType::AS && paren_depth == 0 &&
+		           block_depth == 0) {
+			// the routine body is not a block - stop looking for one in this statement
 			head = SQLStatementHead::OTHER;
 		}
 		statement_start = false;
@@ -3079,6 +3086,7 @@ bool ShellState::SQLIsComplete(const char *zSql) {
 				head = SQLStatementHead::OTHER;
 				paren_depth = 0;
 			}
+			case_expr_depth = 0;
 			statement_start = true;
 			prev_word = SQLWordType::OTHER;
 			break;
@@ -3192,12 +3200,13 @@ bool ShellState::SQLIsComplete(const char *zSql) {
 		}
 		default: {
 			if (!IsSQLWordStart(*zSql)) {
+				// the AS demotion check must see the parenthesis depth in front of this token
+				HandleOtherToken();
 				if (*zSql == '(') {
 					paren_depth++;
 				} else if (*zSql == ')' && paren_depth > 0) {
 					paren_depth--;
 				}
-				HandleOtherToken();
 				next_state = SQLParseState::NORMAL;
 				break;
 			}
@@ -3241,6 +3250,7 @@ bool ShellState::SQLIsComplete(const char *zSql) {
 						block_depth++;
 						break;
 					case SQLWordType::BLOCK_OPENER:
+					case SQLWordType::CASE:
 						block_depth++;
 						break;
 					case SQLWordType::SEPARATOR:
@@ -3275,6 +3285,13 @@ bool ShellState::SQLIsComplete(const char *zSql) {
 						// the routine body is a plain expression or query - stop looking for a block
 						head = SQLStatementHead::OTHER;
 					}
+				}
+			} else if (word == SQLWordType::CASE) {
+				// a mid-statement CASE starts a CASE expression - its THEN/ELSE/END are not procedural
+				case_expr_depth++;
+			} else if (case_expr_depth > 0) {
+				if (word == SQLWordType::END) {
+					case_expr_depth--;
 				}
 			} else if (word == SQLWordType::SEPARATOR || word == SQLWordType::LOOP) {
 				// THEN / ELSE / DO / LOOP inside a body - the next token starts a new statement
