@@ -863,6 +863,50 @@ static ColumnIndex CreateVariantTypedValuePushdown(const ParquetColumnSchema &sc
 	return result_index;
 }
 
+//! Restricts a shred group to the shredded field that the extract path descends into, so that extracting a single
+//! field does not read and rebuild all of its shredded siblings. Returns nullptr when the group cannot be restricted,
+//! in which case the entire group has to be read.
+static unique_ptr<ColumnIndex> CreateVariantProjectionPrune(const ParquetColumnSchema &shred_group, idx_t group_index,
+                                                            const ColumnIndex &extract_path) {
+	D_ASSERT(StructType::IsStruct(shred_group.type));
+	D_ASSERT(extract_path.HasChildren());
+	auto &component = extract_path.GetChildIndexes()[0];
+	if (component.HasPrimaryIndex()) {
+		//! Not a field path, so we cannot tell which shredded field is needed
+		return nullptr;
+	}
+	auto field_index = shred_group.GetChildIndexByName(component.GetFieldName());
+	if (!field_index.IsValid()) {
+		//! This field is not shredded, so it can only be held by the parent's 'value' column
+		return nullptr;
+	}
+	auto &field_schema = shred_group.GetChildByIndex(field_index.GetIndex());
+	vector<ColumnIndex> field_children;
+	auto value_index = field_schema.GetChildIndexByName("value");
+	auto nested_typed_value_index = field_schema.GetChildIndexByName("typed_value");
+	if (component.HasChildren() && value_index.IsValid() && nested_typed_value_index.IsValid()) {
+		auto &nested_schema = field_schema.GetChildByIndex(nested_typed_value_index.GetIndex());
+		//! Only a shredded OBJECT can be restricted to a single field
+		if (StructType::IsStruct(nested_schema.type)) {
+			auto nested = CreateVariantProjectionPrune(nested_schema, nested_typed_value_index.GetIndex(), component);
+			if (nested) {
+				//! 'value' is the fallback for the field, so it always has to be read alongside 'typed_value'
+				ColumnIndex value_child(value_index.GetIndex());
+				value_child.SetType(field_schema.GetChildByIndex(value_index.GetIndex()).type);
+				field_children.push_back(std::move(value_child));
+				field_children.push_back(std::move(*nested));
+			}
+		}
+	}
+	ColumnIndex field(field_index.GetIndex(), std::move(field_children));
+	field.SetType(field_schema.type);
+	vector<ColumnIndex> group_children;
+	group_children.push_back(std::move(field));
+	ColumnIndex result(group_index, std::move(group_children));
+	result.SetType(shred_group.type);
+	return make_uniq<ColumnIndex>(std::move(result));
+}
+
 static unique_ptr<ColumnReader> CreateInt96StructReader(ClientContext &context, const ParquetReader &reader,
                                                         const ParquetColumnSchema &schema,
                                                         optional_ptr<const ColumnIndex> pushdown_child) {
@@ -976,6 +1020,10 @@ unique_ptr<ColumnReader> ParquetReader::CreateReaderRecursive(ClientContext &con
 		}
 		vector<unique_ptr<ColumnReader>> children;
 		children.resize(schema.children.size());
+		//! Index of the 'typed_value' child for a shredded VARIANT
+		idx_t typed_value_idx = schema.children.size() == 3 ? 2 : DConstants::INVALID_INDEX;
+		bool skip_typed_value = false;
+		unique_ptr<ColumnIndex> typed_value_projection;
 		if (schema.children.size() == 3 && column_id.IsPushdownExtract()) {
 			//! VARIANT is shredded - it has a 'typed_value' column
 			auto &typed_value_schema = schema.children[2];
@@ -992,10 +1040,30 @@ unique_ptr<ColumnReader> ParquetReader::CreateReaderRecursive(ClientContext &con
 				auto typed_value_index = CreateVariantTypedValuePushdown(typed_value_schema, column_id);
 				return CreateReaderRecursive(context, typed_value_index, typed_value_schema);
 			}
+			auto &component = column_id.GetChildIndexes()[0];
+			if (!component.HasPrimaryIndex() && StructType::IsStruct(typed_value_schema.type)) {
+				//! Only a field path can be matched against the shredded fields
+				if (typed_value_schema.GetChildIndexByName(component.GetFieldName()).IsValid()) {
+					//! Only read the shredded fields that the extracted path can descend into
+					typed_value_projection =
+					    CreateVariantProjectionPrune(typed_value_schema, typed_value_idx, column_id);
+				} else {
+					//! The extracted field is not shredded, so only 'value' can hold it
+					skip_typed_value = true;
+				}
+			}
 		}
 		for (idx_t child_index = 0; child_index < schema.children.size(); child_index++) {
-			children[child_index] =
-			    CreateReaderRecursive(context, ColumnIndex(child_index), schema.children[child_index]);
+			auto child_column_id = ColumnIndex(child_index);
+			if (child_index == typed_value_idx) {
+				if (skip_typed_value) {
+					continue;
+				}
+				if (typed_value_projection) {
+					child_column_id = *typed_value_projection;
+				}
+			}
+			children[child_index] = CreateReaderRecursive(context, child_column_id, schema.children[child_index]);
 		}
 		// Create the VariantColumnReader with the column index, so we can perform the extract at Read
 		auto column_reader = make_uniq<VariantColumnReader>(context, *this, schema, std::move(children), column_id);
