@@ -37,7 +37,7 @@ struct DecimalScaleInput {
 	    : result(result_p), vector_cast_data(result, parameters), factor(factor_p) {
 	}
 	DecimalScaleInput(Vector &result_p, LIMIT_TYPE limit_p, FACTOR_TYPE factor_p, CastParameters &parameters,
-	                  uint8_t source_width_p, uint8_t source_scale_p)
+	                  uint32_t source_width_p, uint32_t source_scale_p)
 	    : result(result_p), vector_cast_data(result, parameters), limit(limit_p), factor(factor_p),
 	      source_width(source_width_p), source_scale(source_scale_p) {
 	}
@@ -46,8 +46,8 @@ struct DecimalScaleInput {
 	VectorTryCastData vector_cast_data;
 	LIMIT_TYPE limit;
 	FACTOR_TYPE factor;
-	uint8_t source_width;
-	uint8_t source_scale;
+	uint32_t source_width;
+	uint32_t source_scale;
 };
 
 struct DecimalScaleUpOperator {
@@ -226,13 +226,13 @@ static bool DecimalDecimalCastSwitch(Vector &source, Vector &result, idx_t count
 }
 
 struct DecimalStringCastInput {
-	DecimalStringCastInput(Vector &result_p, uint8_t width_p, uint8_t scale_p)
+	DecimalStringCastInput(Vector &result_p, uint32_t width_p, uint32_t scale_p)
 	    : heap(StringVector::GetStringHeap(result_p)), width(width_p), scale(scale_p) {
 	}
 
 	StringHeap &heap;
-	uint8_t width;
-	uint8_t scale;
+	uint32_t width;
+	uint32_t scale;
 };
 
 struct StringCastFromDecimalOperator {
@@ -255,6 +255,10 @@ static bool DecimalToStringCast(Vector &source, Vector &result, idx_t count, Cas
 
 BoundCastInfo DefaultCasts::DecimalCastSwitch(BindCastInput &input, const LogicalType &source,
                                               const LogicalType &target) {
+	if (source.InternalType() == PhysicalType::VARCHAR) {
+		// wide decimal source
+		return FromWideDecimalCastSwitch(input, source, target);
+	}
 	// now switch on the result type
 	switch (target.id()) {
 	case LogicalTypeId::BOOLEAN:
@@ -279,7 +283,13 @@ BoundCastInfo DefaultCasts::DecimalCastSwitch(BindCastInput &input, const Logica
 		return FromDecimalCast<hugeint_t>;
 	case LogicalTypeId::UHUGEINT:
 		return FromDecimalCast<uhugeint_t>;
+	case LogicalTypeId::BIGNUM:
+		return DecimalToBignumCast;
 	case LogicalTypeId::DECIMAL: {
+		if (target.InternalType() == PhysicalType::VARCHAR) {
+			// fixed-size decimal to wide decimal
+			return ToWideDecimalCast;
+		}
 		// decimal to decimal cast
 		// first we need to figure out the source and target internal types
 		switch (source.InternalType()) {

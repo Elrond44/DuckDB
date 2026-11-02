@@ -2,6 +2,7 @@
 
 #include "duckdb/function/cast/variant/to_variant_fwd.hpp"
 #include "duckdb/common/types.hpp"
+#include "duckdb/common/types/decimal.hpp"
 
 namespace duckdb {
 namespace variant {
@@ -344,8 +345,8 @@ bool ConvertPrimitiveToVariant(ToVariantSourceData &source, ToVariantGlobalResul
 		return ConvertPrimitiveTemplated<WRITE_DATA, IGNORE_NULLS, VariantLogicalType::DOUBLE, double>(
 		    source, result, count, selvec, values_index_selvec, empty_payload, is_root);
 	case LogicalTypeId::DECIMAL: {
-		uint8_t width;
-		uint8_t scale;
+		uint32_t width;
+		uint32_t scale;
 		type.GetDecimalProperties(width, scale);
 		DecimalConversionPayloadToVariant payload(width, scale);
 
@@ -362,6 +363,10 @@ bool ConvertPrimitiveToVariant(ToVariantSourceData &source, ToVariantGlobalResul
 		case PhysicalType::INT128:
 			return ConvertPrimitiveTemplated<WRITE_DATA, IGNORE_NULLS, VariantLogicalType::DECIMAL, hugeint_t>(
 			    source, result, count, selvec, values_index_selvec, payload, is_root);
+		case PhysicalType::VARCHAR:
+			throw NotImplementedException("Can't convert %s to VARIANT: DECIMAL values wider than %d digits are not "
+			                              "supported in VARIANT",
+			                              type.ToString(), Decimal::MAX_WIDTH_INT128);
 		default:
 			NotImplementedException::Throw("Can't convert DECIMAL value of physical type: %s", physical_type);
 		};

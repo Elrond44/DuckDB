@@ -291,8 +291,8 @@ struct VariantBuilder {
 		case LogicalTypeId::DECIMAL: {
 			variant_type = VariantLogicalType::DECIMAL;
 			auto &type = primitive.type();
-			uint8_t width;
-			uint8_t scale;
+			uint32_t width;
+			uint32_t scale;
 			type.GetDecimalProperties(width, scale);
 			VariantBuilderAppendVarint(blob, width);
 			VariantBuilderAppendVarint(blob, scale);
@@ -309,6 +309,10 @@ struct VariantBuilder {
 			case PhysicalType::INT128:
 				VariantBuilderAppendFixed(blob, primitive.GetValueUnsafe<hugeint_t>());
 				break;
+			case PhysicalType::VARCHAR:
+				throw NotImplementedException("Can't convert %s to VARIANT: DECIMAL values wider than %d digits are "
+				                              "not supported in VARIANT",
+				                              type.ToString(), Decimal::MAX_WIDTH_INT128);
 			default:
 				throw InternalException("Unexpected physical type for Decimal value: %s",
 				                        EnumUtil::ToString(type.InternalType()));

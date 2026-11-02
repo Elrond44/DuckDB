@@ -5,6 +5,7 @@
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/exception/transaction_exception.hpp"
 #include "duckdb/common/index_map.hpp"
+#include "duckdb/common/types/decimal.hpp"
 #include "duckdb/common/type_visitor.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/index/art/art.hpp"
@@ -95,6 +96,19 @@ static void CheckTypeIsSupported(const LogicalType &logical_type, AttachedDataba
 				                            required, db.GetName(), current);
 			}
 		} break;
+		case LogicalTypeId::DECIMAL: {
+			// decimals wider than 38 digits are stored as BIGNUM blobs, which older engines cannot read
+			const auto storage_version = db.GetStorageManager().GetStorageVersion();
+			if (storage_version < Decimal::WIDE_VERSION_ADDED && Decimal::IsWide(DecimalType::GetWidth(type))) {
+				auto required = GetStorageVersionName(Decimal::WIDE_VERSION_ADDED, false);
+				auto current = GetStorageVersionName(storage_version, false);
+
+				throw InvalidInputException(
+				    "DECIMAL columns wider than %d digits are not supported in storage versions "
+				    "prior to %s (database %s is using storage version %s)",
+				    Decimal::MAX_WIDTH_INT128, required, db.GetName(), current);
+			}
+		} break;
 		case LogicalTypeId::VARIANT: {
 			const auto storage_version = db.GetStorageManager().GetStorageVersion();
 
@@ -174,11 +188,14 @@ DuckTableEntry::DuckTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, Bou
 		return;
 	}
 
+	// the types of all columns are written to the catalog, those of the generated columns included
+	for (auto &col_def : columns.Logical()) {
+		CheckTypeIsSupported(col_def.Type(), catalog.GetAttached());
+	}
+
 	// create the physical storage
 	vector<ColumnDefinition> column_defs;
 	for (auto &col_def : columns.Physical()) {
-		CheckTypeIsSupported(col_def.Type(), catalog.GetAttached());
-
 		column_defs.push_back(col_def.Copy());
 	}
 	storage = make_shared_ptr<DataTable>(catalog.GetAttached(), StorageManager::Get(catalog).GetTableIOManager(&info),

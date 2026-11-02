@@ -5,6 +5,7 @@
 #include "duckdb/function/cast/cast_function_set.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/planner/expression_binder.hpp"
+#include "duckdb/common/types/decimal.hpp"
 
 namespace duckdb {
 
@@ -173,8 +174,8 @@ bool BoundCastExpression::CastIsInvertible(const LogicalType &source_type, const
 		return false;
 	}
 	if (source_type.id() == LogicalTypeId::DECIMAL || target_type.id() == LogicalTypeId::DECIMAL) {
-		uint8_t source_width, target_width;
-		uint8_t source_scale, target_scale;
+		uint32_t source_width, target_width;
+		uint32_t source_scale, target_scale;
 		// cast to or from decimal
 		// cast is only invertible if the cast is strictly widening
 		if (!source_type.GetDecimalProperties(source_width, source_scale)) {
@@ -386,6 +387,10 @@ bool BoundCastExpression::CastCanThrow(const LogicalType &source_type, const Log
 	// BIGNUM has arbitrary precision, so its values do not necessarily fit in any other type, e.g. BIGNUM -> DOUBLE
 	// overflows for large values, even though BIGNUM implicitly casts to DOUBLE
 	if (source_type.id() == LogicalTypeId::BIGNUM) {
+		return true;
+	}
+	// Wide decimals hold up to 255 digits, which do not fit in FLOAT or the fixed-size types
+	if (source_type.id() == LogicalTypeId::DECIMAL && Decimal::IsWide(DecimalType::GetWidth(source_type))) {
 		return true;
 	}
 	// Floating point values that are not finite (NaN, inf) cannot be represented as a BIGNUM

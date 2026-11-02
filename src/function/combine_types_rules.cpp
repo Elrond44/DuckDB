@@ -1,5 +1,6 @@
 #include "duckdb/function/combine_types_rule.hpp"
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/types/decimal.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/insertion_order_preserving_map.hpp"
 
@@ -141,14 +142,15 @@ static bool CombineEqualDecimal(LogicalTypeResolver &logical_type_resolver, cons
 	// using the max of these of the two types gives us the new decimal size
 	auto extra_width_left = DecimalType::GetWidth(left) - DecimalType::GetScale(left);
 	auto extra_width_right = DecimalType::GetWidth(right) - DecimalType::GetScale(right);
-	auto extra_width =
-	    MaxValue<uint8_t>(NumericCast<uint8_t>(extra_width_left), NumericCast<uint8_t>(extra_width_right));
-	auto scale = MaxValue<uint8_t>(DecimalType::GetScale(left), DecimalType::GetScale(right));
-	auto width = NumericCast<uint8_t>(extra_width + scale);
-	if (width > DecimalType::MaxWidth()) {
+	auto extra_width = MaxValue<uint32_t>(extra_width_left, extra_width_right);
+	auto scale = MaxValue<uint32_t>(DecimalType::GetScale(left), DecimalType::GetScale(right));
+	uint32_t width = extra_width + scale;
+	const auto width_limit = Decimal::MaxResultWidth(
+	    logical_type_resolver.context, MaxValue<uint32_t>(DecimalType::GetWidth(left), DecimalType::GetWidth(right)));
+	if (width > width_limit) {
 		// if the resulting decimal does not fit, we truncate the scale
-		width = DecimalType::MaxWidth();
-		scale = NumericCast<uint8_t>(width - extra_width);
+		width = width_limit;
+		scale = width - extra_width;
 	}
 	result = LogicalType::DECIMAL(width, scale);
 	return true;
