@@ -276,6 +276,8 @@ enum class FilterPropagateResult : uint8_t;
 
 enum class ForeignKeyType : uint8_t;
 
+enum class FunctionBindingSensitivity : uint8_t;
+
 enum class FunctionCollationHandling : uint8_t;
 
 enum class FunctionErrors : uint8_t;
@@ -1064,6 +1066,9 @@ const char* EnumUtil::ToChars<FilterPropagateResult>(FilterPropagateResult value
 
 template<>
 const char* EnumUtil::ToChars<ForeignKeyType>(ForeignKeyType value);
+
+template<>
+const char* EnumUtil::ToChars<FunctionBindingSensitivity>(FunctionBindingSensitivity value);
 
 template<>
 const char* EnumUtil::ToChars<FunctionCollationHandling>(FunctionCollationHandling value);
@@ -2064,6 +2069,9 @@ FilterPropagateResult EnumUtil::FromString<FilterPropagateResult>(const char *va
 
 template<>
 ForeignKeyType EnumUtil::FromString<ForeignKeyType>(const char *value);
+
+template<>
+FunctionBindingSensitivity EnumUtil::FromString<FunctionBindingSensitivity>(const char *value);
 
 template<>
 FunctionCollationHandling EnumUtil::FromString<FunctionCollationHandling>(const char *value);
