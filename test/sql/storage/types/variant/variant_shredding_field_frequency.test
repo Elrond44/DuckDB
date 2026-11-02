@@ -1,0 +1,221 @@
+# name: test/sql/storage/types/variant/variant_shredding_field_frequency.test
+# description: Test that only the 32 most frequent object fields are shredded
+# group: [variant]
+
+require json
+
+load {TEST_DIR}/variant_shredding_field_frequency.db readwrite v2.0.0
+
+# Always shred
+statement ok
+SET variant_minimum_shredding_size = 0;
+
+# Number of fields in the shredded object type - every shredded field lives at '[0, 2, 1, field_index]'
+statement ok
+CREATE MACRO shredded_field_count(tbl) AS (
+	SELECT COUNT(DISTINCT regexp_extract(column_path, '^\[0, 2, 1, ([0-9]+)', 1))::INT
+	FROM pragma_storage_info(tbl)
+	WHERE regexp_matches(column_path, '^\[0, 2, 1, [1-9][0-9]*($|,)')
+);
+
+# Number of object keys that are kept in the unshredded overlay - keys are stored at '[0, 1, 1, 1]'
+statement ok
+CREATE MACRO overlay_key_count(tbl) AS (
+	SELECT COALESCE(SUM(count), 0)::BIGINT
+	FROM pragma_storage_info(tbl)
+	WHERE column_path = '[0, 1, 1, 1]'
+);
+
+# ------------------------------ Homogeneous data ------------------------------
+
+# Every object has the same two fields - both are shredded, nothing goes to the overlay
+statement ok
+CREATE TABLE homogeneous AS SELECT {'a': i, 'b': 'value_' || i::VARCHAR}::VARIANT AS col FROM range(100) t(i);
+
+statement ok
+CHECKPOINT;
+
+query II
+SELECT shredded_field_count('homogeneous'), overlay_key_count('homogeneous')
+----
+2	0
+
+query I
+SELECT SUM(col.a::BIGINT) FROM homogeneous
+----
+4950
+
+query I
+SELECT COUNT(DISTINCT col::VARCHAR) FROM homogeneous
+----
+100
+
+restart
+
+query II
+SELECT shredded_field_count('homogeneous'), overlay_key_count('homogeneous')
+----
+2	0
+
+query I
+SELECT SUM(col.a::BIGINT) FROM homogeneous
+----
+4950
+
+# ------------------------------ Long tail ------------------------------
+
+# Every row adds a key that occurs in that single row only - the cap only leaves room for 'a', 'b' and 30 of the
+# 1000 keys, the tail of the keys stays in the overlay
+statement ok
+CREATE TABLE long_tail AS SELECT json_object('a', i, 'b', 'value_' || i::VARCHAR, 'k' || i::VARCHAR,
+	i)::VARIANT AS col FROM range(1000) t(i);
+
+statement ok
+CHECKPOINT;
+
+query II
+SELECT shredded_field_count('long_tail'), overlay_key_count('long_tail')
+----
+32	970
+
+# The keys that did not make the cut are still readable, they are served from the overlay
+query I
+SELECT col.k42::BIGINT FROM long_tail WHERE col.a = 42
+----
+42
+
+query I
+SELECT SUM(TRY_CAST(col.k7 AS BIGINT)) FROM long_tail
+----
+7
+
+query I
+SELECT COUNT(DISTINCT col::VARCHAR) FROM long_tail
+----
+1000
+
+restart
+
+query II
+SELECT shredded_field_count('long_tail'), overlay_key_count('long_tail')
+----
+32	970
+
+query I
+SELECT col.k42::BIGINT FROM long_tail WHERE col.a = 42
+----
+42
+
+# Appending more rare keys keeps the shred type capped at 32 fields
+statement ok
+INSERT INTO long_tail SELECT json_object('a', i + 1000, 'b', 'value_' || (i + 1000)::VARCHAR,
+	'k' || (i + 1000)::VARCHAR, i + 1000)::VARIANT FROM range(1000) t(i);
+
+statement ok
+CHECKPOINT;
+
+query II
+SELECT shredded_field_count('long_tail'), overlay_key_count('long_tail')
+----
+32	1970
+
+query I
+SELECT col.k1420::BIGINT FROM long_tail WHERE col.a = 1420
+----
+1420
+
+# ------------------------------ Frequent fields ------------------------------
+
+# 'half' occurs in 50% of the objects - it is shredded like any other field
+statement ok
+CREATE TABLE frequent AS SELECT CASE WHEN i % 2 = 0 THEN json_object('a', i, 'b', 'value_' || i::VARCHAR,
+	'half', i) ELSE json_object('a', i, 'b', 'value_' || i::VARCHAR) END::VARIANT AS col FROM range(100) t(i);
+
+# There is no presence threshold - a field that occurs in 0.9% of the objects is shredded as well
+statement ok
+CREATE TABLE rare_field AS SELECT CASE WHEN i < 9 THEN json_object('a', i, 'rare', i) ELSE
+	json_object('a', i) END::VARIANT AS col FROM range(1000) t(i);
+
+# An object with many frequent fields is capped - only the 32 most frequent fields are shredded
+statement ok
+CREATE TABLE capped AS SELECT obj::JSON::VARIANT AS col FROM range(100) t(i), (SELECT '{' || string_agg('"f' ||
+	j::VARCHAR || '":' || j::VARCHAR, ',') || '}' AS obj FROM range(40) t2(j)) o;
+
+statement ok
+CHECKPOINT;
+
+query II
+SELECT shredded_field_count('frequent'), overlay_key_count('frequent')
+----
+3	0
+
+query I
+SELECT SUM(col.half::BIGINT) FROM frequent
+----
+2450
+
+# No presence threshold: a field seen in 0.9% of the objects is still shredded
+query II
+SELECT shredded_field_count('rare_field'), overlay_key_count('rare_field')
+----
+2	0
+
+query I
+SELECT SUM(col.rare::BIGINT) FROM rare_field
+----
+36
+
+# 40 frequent fields, 32 are shredded and the other 8 stay in the overlay
+query II
+SELECT shredded_field_count('capped'), overlay_key_count('capped')
+----
+32	800
+
+query II
+SELECT SUM(col.f39::BIGINT), COUNT(*) FROM capped
+----
+3900	100
+
+# ------------------------------ Nested objects ------------------------------
+
+# 'inner' is shredded, and so is the nested 'rare' field (0.5% of the inner objects) - there is room left in the cap
+statement ok
+CREATE TABLE nested AS SELECT json_object('a', i, 'inner', CASE WHEN i < 5 THEN json_object('x', i, 'rare',
+	i) ELSE json_object('x', i) END)::VARIANT AS col FROM range(1000) t(i);
+
+statement ok
+CHECKPOINT;
+
+query II
+SELECT shredded_field_count('nested'), overlay_key_count('nested')
+----
+2	0
+
+query II
+SELECT col.inner.x::BIGINT, TRY_CAST(col.inner.rare AS BIGINT) FROM nested WHERE col.a = 3
+----
+3	3
+
+query II
+SELECT col.inner.x::BIGINT, TRY_CAST(col.inner.rare AS BIGINT) FROM nested WHERE col.a = 42
+----
+42	NULL
+
+# ------------------------------ Empty objects ------------------------------
+
+# An object without any fields cannot be shredded - this must not fail
+statement ok
+CREATE TABLE empty_object AS SELECT '{}'::JSON::VARIANT AS col FROM range(10) t(i);
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT COUNT(*) FROM pragma_storage_info('empty_object') WHERE column_path LIKE '[0, 2%'
+----
+0
+
+query I
+SELECT COUNT(DISTINCT col::VARCHAR) FROM empty_object
+----
+1

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/types/variant.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/types/selection_vector.hpp"
@@ -8,7 +9,42 @@
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/function/scalar/variant_utils.hpp"
 
+#include <utility>
+
 namespace duckdb {
+
+//! At most this many fields are shredded per object - every shredded field adds a column, and past this point the
+//! extra columns cost more to read and write than they save.
+constexpr idx_t VARIANT_SHREDDED_FIELD_LIMIT = 32;
+
+//! Returns the names of the VARIANT_SHREDDED_FIELD_LIMIT most frequent fields to shred on.
+//! Fields are returned ordered by decreasing occurrence, ties broken by name so the result is stable.
+inline vector<string> VariantSelectShreddedFields(vector<pair<string, idx_t>> fields) {
+	vector<pair<string, idx_t>> selected;
+	selected.reserve(fields.size());
+	for (auto &field : fields) {
+		if (field.first.empty()) {
+			// a STRUCT field cannot have an empty name, so the empty key stays in the 'value'
+			continue;
+		}
+		selected.push_back(std::move(field));
+	}
+	std::sort(selected.begin(), selected.end(), [](const pair<string, idx_t> &a, const pair<string, idx_t> &b) {
+		if (a.second != b.second) {
+			return a.second > b.second;
+		}
+		return a.first < b.first;
+	});
+	if (selected.size() > VARIANT_SHREDDED_FIELD_LIMIT) {
+		selected.resize(VARIANT_SHREDDED_FIELD_LIMIT);
+	}
+	vector<string> result;
+	result.reserve(selected.size());
+	for (auto &field : selected) {
+		result.push_back(std::move(field.first));
+	}
+	return result;
+}
 
 struct VariantColumnStatsData {
 public:

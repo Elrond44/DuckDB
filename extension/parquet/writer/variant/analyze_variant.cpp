@@ -18,6 +18,7 @@
 #include "duckdb/common/vector.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
 #include "duckdb/function/scalar/variant_utils.hpp"
+#include "duckdb/function/variant/variant_shredding.hpp"
 #include "parquet_column_schema.hpp"
 
 namespace duckdb {
@@ -203,20 +204,22 @@ static bool ConstructShreddedType(const VariantAnalyzeData &state, LogicalType &
 			}
 			auto &object_data = *state.object_data;
 
-			//! TODO: implement some logic to determine which fields are worth shredding, considering the overhead when
-			//! only 10% of rows make use of the field
-			child_list_t<LogicalType> field_types;
+			vector<pair<string, idx_t>> field_counts;
+			field_counts.reserve(object_data.fields.size());
 			for (auto &field : object_data.fields) {
-				if (field.first.empty()) {
-					//! A STRUCT field cannot have an empty name, so the empty key stays in the 'value'
-					continue;
-				}
+				field_counts.emplace_back(field.first, field.second.total_count);
+			}
+			auto shredded_fields = VariantSelectShreddedFields(std::move(field_counts));
+
+			child_list_t<LogicalType> field_types;
+			for (auto &field_name : shredded_fields) {
+				auto &field = object_data.fields.at(field_name);
 				LogicalType child_type;
-				if (!ConstructShreddedType(field.second, child_type, depth + 1)) {
+				if (!ConstructShreddedType(field, child_type, depth + 1)) {
 					// cannot shred on this field - skip
 					continue;
 				}
-				field_types.emplace_back(field.first, child_type);
+				field_types.emplace_back(field_name, child_type);
 			}
 			if (field_types.empty()) {
 				// no field types to shred on - avoid shredding
