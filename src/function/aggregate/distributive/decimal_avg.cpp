@@ -74,7 +74,7 @@ struct DecimalAvgOperation {
 	}
 
 	template <class RESULT, class STATE>
-	static void Finalize(STATE &state, RESULT &target, AggregateFinalizeData &fd) {
+	static void FinalizeReadOnly(const STATE &state, RESULT &target, AggregateFinalizeData &fd) {
 		if (state.count == 0) {
 			fd.ReturnNull();
 			return;
